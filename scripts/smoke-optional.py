@@ -40,7 +40,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 def run(label, command, stdin=None, hidden_environment=False):
     environment = {"PATH": os.environ.get("PATH", "")}
     if hidden_environment:
-        environment["FIRSTCALL_OPTIONAL_VALUE"] = "must-not-be-used"
+        environment["FIRSTCALL_SLOT_OPTIONAL_VALUE"] = "must-not-be-used"
     result = subprocess.run([str(cli), *map(str, command)], input=stdin,
                             env=environment, text=True, capture_output=True, timeout=30)
     (out / (label + ".stdout")).write_text(result.stdout)
