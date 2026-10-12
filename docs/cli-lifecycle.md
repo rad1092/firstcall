@@ -34,6 +34,8 @@ does not modify recipe storage while serving a package.
 ```text
 firstcall-cli version
 firstcall-cli serve --package PATH [--allow-mutating]
+firstcall-cli connect --package PATH [--allow-mutating]
+firstcall-cli package-native --recipe-json PATH --tool-json PATH --out DIR [--allow-mutating]
 firstcall-cli explain --recipe-json PATH
 firstcall-cli package --recipe-json PATH --out DIR
 firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
@@ -192,3 +194,59 @@ firstcall-cli inspect-package --dir ./dist/reverified-agent-tool --json
 ```
 
 Imported recipes require local re-verification before `package --recipe-id` can export them. `verify --recipe-id --dry-run` does not execute HTTP or update SQLite. Actual `verify --recipe-id` updates SQLite verification metadata only on success. `package --recipe-id` does not execute HTTP or mutate SQLite.
+
+## Native export and relocation (0.3.1)
+
+`package` retains the legacy generated TypeScript package format. `package-native`
+uses the same native exporter as the desktop app, requires a verified recipe and
+an explicit `tool.json` contract, and prints the client configuration as JSON.
+It stages the package atomically and refuses to overwrite an existing directory.
+Tool definitions must describe all non-secret input slots with no extra fields;
+see `scripts/smoke-native.py` for a complete synthetic example.
+
+```sh
+firstcall-cli verify --recipe-json recipe.json --out verified.json
+firstcall-cli package-native --recipe-json verified.json --tool-json tool.json --out /absolute/new/tool
+firstcall-cli connect --package /absolute/moved/tool
+```
+
+`connect` uses the running executable's canonical path and the supplied package's
+canonical directory. It performs the same admission checks as `serve`, including
+manifest hashes, tool contract, method, host and path policy. Invalid or tampered
+packages produce no configuration on stdout. The command does not send HTTP,
+read environment credential values, edit the exported configuration, or modify
+recipe storage. Repeated calls return the same configuration at the same paths.
+Credential names are included with empty values; supply them in the client's
+settings after replacing its server entry. Do not redirect output over an
+existing package file: the shell can truncate a file before validation starts.
+
+For non-GET/HEAD tools, verification, native export, refreshed connection and
+serving each require `--allow-mutating`. Moving files never grants this opt-in.
+The flag is an explicit acknowledgment, not an authorization system for an API.
+
+To reproduce the installed-binary loopback checks with only Python's standard
+library (the output directory must be new):
+
+```sh
+python3 scripts/smoke-native.py /absolute/path/to/firstcall-cli /tmp/firstcall-evidence
+```
+
+The test covers actual verify/export/serve, redaction, three repeated reads,
+relocation, missing credentials, invalid arguments, redirects, oversized and
+malformed responses, package tampering, and write opt-in at each stage. Closing
+an idle server preserves package files; cancelling a process cannot undo an HTTP
+request already sent or a remote mutation already committed.
+
+## Optional query and header values
+
+Verification omits an optional query/header field when a declared optional input
+used by that field is unset or blank. It omits the whole field, including a
+composed template; literal fields and supplied values are retained. A required
+field, required input or undeclared placeholder is never silently dropped.
+The verified recipe retains its optional contract so later MCP callers can
+supply the value or omit it. MCP arguments are never silently populated from
+matching environment variables.
+
+Run `python3 scripts/smoke-optional.py /path/to/firstcall-cli /new/evidence` for
+real verify → native export → stdio MCP → HTTP checks of both omissions and
+supplied values. These checks use a local synthetic server and no credentials.

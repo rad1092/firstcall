@@ -58,6 +58,36 @@ pub fn serve_stdio(package: &Path, options: ServeOptions) -> Result<()> {
     serve(tool, io::stdin().lock(), io::stdout().lock())
 }
 
+/// Refresh connection paths without writing the package, reading credentials,
+/// or making an API request. Use exactly the same admission checks as `serve`.
+pub fn client_config(package: &Path, executable: &Path, options: ServeOptions) -> Result<String> {
+    use crate::export::native_package::{
+        NativeExportOptions, NativeToolDefinition, native_client_config_with_options,
+    };
+    let package = fs::canonicalize(package).context("Cannot resolve package directory")?;
+    let executable = fs::canonicalize(executable).context("Cannot resolve FirstCall executable")?;
+    if !executable.is_file() {
+        bail!("FirstCall executable must be a file");
+    }
+    let tool = PackageTool::load(&package, options)?;
+    let definition = NativeToolDefinition {
+        schema_version: tool.definition.schema_version,
+        name: tool.definition.name,
+        title: tool.definition.title,
+        description: tool.definition.description,
+        input_schema: tool.definition.input_schema,
+    };
+    native_client_config_with_options(
+        &tool.recipe,
+        &definition,
+        &executable,
+        &package,
+        NativeExportOptions {
+            allow_mutating: options.allow_mutating,
+        },
+    )
+}
+
 impl PackageTool {
     fn load(path: &Path, options: ServeOptions) -> Result<Self> {
         bound_package_files(path)?;

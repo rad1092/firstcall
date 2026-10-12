@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 022
 
 usage() {
-  echo "Usage: $0 <release-binary-dir> <new-output-dir> [version, default 0.3.0]" >&2
+  echo "Usage: $0 <release-binary-dir> <new-output-dir> [version, default 0.3.1]" >&2
   echo "Optional: FIRSTCALL_ICON_ICNS=/absolute/path/icon.icns" >&2
   echo "Optional: FIRSTCALL_LICENSE_FILE=/absolute/path/LICENSE (defaults to repo LICENSE)" >&2
 }
@@ -14,7 +14,7 @@ if [[ $# -lt 2 || $# -gt 3 ]]; then
 fi
 binary_dir="$1"
 output_dir="$2"
-version="${3:-0.3.0}"
+version="${3:-0.3.1}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must be a numeric release version such as 0.3.0." >&2
   exit 2

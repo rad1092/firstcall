@@ -6,7 +6,10 @@ use std::process::{Command, Output};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use firstcall::model::{AuthStyle, BodyTemplate, Confidence, Recipe, RuntimeSlot, SlotLocation};
+use firstcall::model::{
+    AuthStyle, BodyTemplate, Confidence, HeaderField, KeyValueField, Recipe, RuntimeSlot,
+    SlotLocation,
+};
 use firstcall::store::db::{AppPaths, open_database};
 use firstcall::store::repos::AppRepository;
 use firstcall::verify::{VerifyOptions, verify_recipe_with_env};
@@ -834,4 +837,123 @@ fn is_sha256_hex(value: &str) -> bool {
 fn assert_no_raw_secret(text: &str) {
     assert!(!text.contains(RAW_SECRET));
     assert!(!text.contains(RAW_BASIC_PASSWORD));
+}
+
+fn optional_parameter_recipe(
+    base_url: &str,
+    location: SlotLocation,
+    value: Option<&str>,
+) -> Recipe {
+    let mut recipe = no_auth_recipe("GET", base_url);
+    let field = KeyValueField {
+        key: if location == SlotLocation::Query {
+            "limit"
+        } else {
+            "X-Note"
+        }
+        .into(),
+        value: "{{optional_value}}".into(),
+        required: false,
+        description: "May be omitted".into(),
+        confidence: Confidence::High,
+    };
+    if location == SlotLocation::Query {
+        recipe.query_template.push(field);
+    } else {
+        recipe.headers_template.push(HeaderField {
+            key: field.key,
+            value: field.value,
+            required: field.required,
+            description: field.description,
+            confidence: field.confidence,
+        });
+    }
+    recipe.slots.push(RuntimeSlot {
+        name: "optional_value".into(),
+        location,
+        required: false,
+        current_value: value.map(str::to_owned),
+        description: String::new(),
+        confidence: Confidence::High,
+    });
+    recipe
+}
+
+#[test]
+fn verify_omits_unset_optional_query_and_header_on_the_wire() {
+    for location in [SlotLocation::Query, SlotLocation::Header] {
+        for value in [None, Some(""), Some("  ")] {
+            let server = spawn_one_shot_http_server(200, r#"{"ok":true}"#);
+            let recipe = optional_parameter_recipe(&server.base_url, location.clone(), value);
+            let report =
+                verify_recipe_with_env(&recipe, VerifyOptions::default(), |_| None).unwrap();
+            let captured = server.join();
+            assert!(report.success(), "{location:?} {value:?}");
+            assert_eq!(captured.requests_received, 1);
+            let request = captured.request_text.unwrap().to_ascii_lowercase();
+            assert!(
+                request.starts_with("get /users/user_123 http/1.1"),
+                "{request}"
+            );
+            assert!(!request.contains("x-note:"));
+            // Verification must preserve the optional contract for later MCP callers.
+            assert_eq!(report.updated_recipe.slots.len(), recipe.slots.len());
+            assert_eq!(
+                report.updated_recipe.query_template.len(),
+                recipe.query_template.len()
+            );
+            assert_eq!(
+                report.updated_recipe.headers_template.len(),
+                recipe.headers_template.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn verify_sends_optional_values_and_literal_fields() {
+    for location in [SlotLocation::Query, SlotLocation::Header] {
+        let server = spawn_one_shot_http_server(200, r#"{"ok":true}"#);
+        let mut recipe = optional_parameter_recipe(&server.base_url, location.clone(), Some("3"));
+        recipe.headers_template.push(HeaderField {
+            key: "X-Literal".into(),
+            value: "kept".into(),
+            required: false,
+            description: String::new(),
+            confidence: Confidence::High,
+        });
+        let report = verify_recipe_with_env(&recipe, VerifyOptions::default(), |_| None).unwrap();
+        let request = server.join().request_text.unwrap().to_ascii_lowercase();
+        assert!(report.success());
+        assert!(request.contains("x-literal: kept"));
+        if location == SlotLocation::Query {
+            assert!(request.starts_with("get /users/user_123?limit=3 http/1.1"));
+        } else {
+            assert!(request.contains("x-note: 3"));
+        }
+    }
+}
+
+#[test]
+fn optional_field_omission_does_not_hide_required_or_unknown_placeholders() {
+    for location in [SlotLocation::Query, SlotLocation::Header] {
+        for required in [true, false] {
+            let server = spawn_no_request_http_server();
+            let mut recipe = optional_parameter_recipe(&server.base_url, location.clone(), None);
+            let (field_required, field_value) = if location == SlotLocation::Query {
+                let field = &mut recipe.query_template[0];
+                (&mut field.required, &mut field.value)
+            } else {
+                let field = &mut recipe.headers_template[0];
+                (&mut field.required, &mut field.value)
+            };
+            *field_required = required;
+            if !required {
+                field_value.push_str("-{{undeclared}}");
+            }
+            let report = verify_recipe_with_env(&recipe, VerifyOptions::default(), |_| None);
+            assert!(report.is_err() || !report.unwrap().success());
+            assert_eq!(server.join().requests_received, 0);
+        }
+    }
 }

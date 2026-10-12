@@ -1,0 +1,72 @@
+name: Verify and package
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: firstcall-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            features: --no-default-features
+          - os: macos-14
+            features: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Set isolated output directories
+        run: |
+          echo "QA_ROOT=$RUNNER_TEMP/firstcall-evidence" >> "$GITHUB_ENV"
+          echo "DIST_ROOT=$RUNNER_TEMP/firstcall-distribution" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: firstcall-${{ runner.os }}-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock') }}
+      - run: cargo fmt --all --check
+      - run: cargo test --locked ${{ matrix.features }}
+      - run: cargo clippy --locked --all-targets ${{ matrix.features }} -- -D warnings
+      - run: python3 scripts/smoke-native.py target/debug/firstcall-cli "$QA_ROOT/native"
+      - run: python3 scripts/smoke-optional.py target/debug/firstcall-cli "$QA_ROOT/optional"
+      - name: Build Apple Silicon release
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --locked --release --bin firstcall --bin firstcall-cli
+          FIRSTCALL_ICON_ICNS="$PWD/assets/FirstCall.icns" scripts/package-macos.sh target/release "$DIST_ROOT" 0.3.1
+          python3 scripts/smoke-native.py "$DIST_ROOT/FirstCall.app/Contents/MacOS/firstcall-cli" "$QA_ROOT/installed"
+          python3 scripts/smoke-optional.py "$DIST_ROOT/FirstCall.app/Contents/MacOS/firstcall-cli" "$QA_ROOT/installed-optional"
+          python3 scripts/release-manifest.py "$DIST_ROOT"
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: firstcall-macos-${{ github.sha }}
+          path: |
+            ${{ env.DIST_ROOT }}/*.zip
+            ${{ env.DIST_ROOT }}/*.tar.gz
+            ${{ env.DIST_ROOT }}/SHA256SUMS.txt
+            ${{ env.DIST_ROOT }}/release-manifest.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firstcall-evidence-${{ runner.os }}-${{ github.sha }}
+          path: |
+            ${{ env.QA_ROOT }}/
+          if-no-files-found: warn
