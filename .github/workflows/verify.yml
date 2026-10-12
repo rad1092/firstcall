@@ -23,9 +23,11 @@ jobs:
     timeout-minutes: 35
     env:
       CARGO_BUILD_JOBS: '2'
-      QA_ROOT: ${{ runner.temp }}/firstcall-evidence
-      DIST_ROOT: ${{ runner.temp }}/firstcall-distribution
     steps:
+      - name: Set isolated output directories
+        run: |
+          echo "QA_ROOT=$RUNNER_TEMP/firstcall-evidence" >> "$GITHUB_ENV"
+          echo "DIST_ROOT=$RUNNER_TEMP/firstcall-distribution" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
