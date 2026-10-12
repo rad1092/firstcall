@@ -227,7 +227,7 @@ pub fn native_client_config(
     )
 }
 
-fn native_client_config_with_options(
+pub(crate) fn native_client_config_with_options(
     recipe: &Recipe,
     tool: &NativeToolDefinition,
     cli_path: &Path,
@@ -334,7 +334,7 @@ pub fn export_native_mcp_package_with_options(
         fs::write(
             staging.join("README.md"),
             format!(
-                "# {}\n\n{}\n\n## Connect\n\n1. Keep this folder and the FirstCall installation at their exported locations.\n2. Copy the server entry from client-config.json into your MCP client's local-server settings.\n3. {}\n4. Restart the MCP connection and call the {} tool.\n\nFirstCall runs this tool directly. Node.js, npm, and a build step are not required.\n\nThe request was verified before export; the first MCP call performs a new request. The package's file hashes and request policy are checked when the server starts. If you move the folder or application, export a new connection configuration.\n\nPackage: {}\nRuntime: {}\n",
+                "# {}\n\n{}\n\n## Connect\n\n1. Keep this folder and the FirstCall installation at their exported locations.\n2. Copy the server entry from client-config.json into your MCP client's local-server settings.\n3. {}\n4. Restart the MCP connection and call the {} tool.\n\nFirstCall runs this tool directly. Node.js, npm, and a build step are not required.\n\nThe request was verified before export; the first MCP call performs a new request. The package's file hashes and request policy are checked when the server starts. If you move the folder or application, run firstcall-cli connect --package PATH from the new FirstCall installation and replace the client configuration. For write requests, repeat the --allow-mutating opt-in.\n\nPackage: {}\nRuntime: {}\n",
                 tool.title,
                 tool.description,
                 env_help,

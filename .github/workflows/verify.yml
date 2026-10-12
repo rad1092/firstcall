@@ -1,0 +1,71 @@
+name: Verify and package
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: firstcall-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            features: --no-default-features
+          - os: macos-14
+            features: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: firstcall-${{ runner.os }}-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock') }}
+      - run: cargo fmt --all --check
+      - run: cargo test --locked ${{ matrix.features }}
+      - run: cargo clippy --locked --all-targets ${{ matrix.features }} -- -D warnings
+      - run: python3 scripts/smoke-native.py target/debug/firstcall-cli target/native-smoke
+      - run: python3 scripts/smoke-optional.py target/debug/firstcall-cli target/optional-smoke
+      - name: Build Apple Silicon release
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --locked --release --bin firstcall --bin firstcall-cli
+          FIRSTCALL_ICON_ICNS="$PWD/assets/FirstCall.icns" scripts/package-macos.sh target/release target/distribution 0.3.1
+          python3 scripts/smoke-native.py target/distribution/FirstCall.app/Contents/MacOS/firstcall-cli target/installed-smoke
+          python3 scripts/smoke-optional.py target/distribution/FirstCall.app/Contents/MacOS/firstcall-cli target/installed-optional
+          python3 scripts/release-manifest.py target/distribution
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: firstcall-macos-${{ github.sha }}
+          path: |
+            target/distribution/*.zip
+            target/distribution/*.tar.gz
+            target/distribution/SHA256SUMS.txt
+            target/distribution/release-manifest.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firstcall-evidence-${{ runner.os }}-${{ github.sha }}
+          path: |
+            target/native-smoke/
+            target/optional-smoke/
+            target/installed-smoke/
+            target/installed-optional/
+          if-no-files-found: warn

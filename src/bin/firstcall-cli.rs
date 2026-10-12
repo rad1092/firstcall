@@ -45,7 +45,7 @@ fn run() -> Result<()> {
             println!("firstcall-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        "serve" => {
+        "serve" | "connect" => {
             let mut package = None;
             let mut allow_mutating = false;
             let mut index = 1;
@@ -60,15 +60,69 @@ fn run() -> Result<()> {
                         package = Some(PathBuf::from(value));
                     }
                     "--allow-mutating" if !allow_mutating => allow_mutating = true,
-                    _ => bail!("serve accepts --package DIR and optional --allow-mutating"),
+                    _ => bail!("{command} accepts --package DIR and optional --allow-mutating"),
                 }
                 index += 1;
             }
-            firstcall::mcp::serve_stdio(
-                &package.context("serve requires --package DIR")?,
-                firstcall::mcp::ServeOptions { allow_mutating },
-            )
+            let package = package.with_context(|| format!("{command} requires --package DIR"))?;
+            let options = firstcall::mcp::ServeOptions { allow_mutating };
+            if command == "connect" {
+                println!(
+                    "{}",
+                    firstcall::mcp::client_config(&package, &std::env::current_exe()?, options)?
+                );
+                Ok(())
+            } else {
+                firstcall::mcp::serve_stdio(&package, options)
+            }
         }
+        "package-native" => {
+            use firstcall::export::native_package::{
+                NativeExportOptions, NativeToolDefinition, export_native_mcp_package_with_options,
+            };
+            let mut recipe_path = None;
+            let mut tool_path = None;
+            let mut out_path = None;
+            let mut allow_mutating = false;
+            let mut index = 1;
+            while index < args.len() {
+                let destination = match args[index].as_str() {
+                    "--recipe-json" if recipe_path.is_none() => Some(&mut recipe_path),
+                    "--tool-json" if tool_path.is_none() => Some(&mut tool_path),
+                    "--out" if out_path.is_none() => Some(&mut out_path),
+                    "--allow-mutating" if !allow_mutating => {
+                        allow_mutating = true;
+                        None
+                    }
+                    _ => bail!(
+                        "package-native accepts --recipe-json FILE --tool-json FILE --out DIR and optional --allow-mutating"
+                    ),
+                };
+                if let Some(destination) = destination {
+                    index += 1;
+                    let value = args.get(index).context("option requires a path")?;
+                    if value.starts_with("--") {
+                        bail!("option requires a path");
+                    }
+                    *destination = Some(PathBuf::from(value));
+                }
+                index += 1;
+            }
+            let recipe = read_recipe_json(&recipe_path.context("--recipe-json is required")?)?;
+            let tool: NativeToolDefinition =
+                serde_json::from_slice(&fs::read(tool_path.context("--tool-json is required")?)?)
+                    .context("Invalid tool definition")?;
+            let exported = export_native_mcp_package_with_options(
+                &recipe,
+                &out_path.context("--out is required")?,
+                &tool,
+                &std::env::current_exe()?,
+                NativeExportOptions { allow_mutating },
+            )?;
+            println!("{}", exported.client_config);
+            Ok(())
+        }
+
         "explain" => {
             let recipe_json = required_path_arg(&args[1..], "--recipe-json")?;
             let recipe = read_recipe_json(&recipe_json)?;
@@ -1221,6 +1275,8 @@ fn print_help() {
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
   firstcall-cli serve --package DIR [--allow-mutating]
+  firstcall-cli connect --package DIR [--allow-mutating]
+  firstcall-cli package-native --recipe-json FILE --tool-json FILE --out DIR [--allow-mutating]
   firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--json]
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]

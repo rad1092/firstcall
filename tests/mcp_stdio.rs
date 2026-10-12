@@ -464,6 +464,177 @@ fn native_export_client_config_runs_an_actual_tool_without_node_or_build() {
 }
 
 #[test]
+fn cli_native_export_relocation_and_connection_preserve_policy_and_credentials() {
+    use firstcall::export::native_package::default_tool_definition;
+    for method in ["GET", "POST"] {
+        let root = tempfile::tempdir().unwrap();
+        let (listener, origin) = create_listener();
+        let mut recipe = recipe(format!("{origin}/users/{{{{user_id}}}}"));
+        recipe.method = method.into();
+        recipe.auth_style = AuthStyle::Bearer {
+            token_slot: "bearer_token".into(),
+            header_name: "Authorization".into(),
+        };
+        recipe.slots.push(slot("bearer_token", SlotLocation::Auth));
+        let recipe_path = root.path().join("recipe.json");
+        fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap()).unwrap();
+        let mut definition = default_tool_definition(&recipe);
+        definition.name = "find_user".into();
+        definition.description = "Look up the fixture user and return its synthetic record.".into();
+        let tool_path = root.path().join("tool.json");
+        fs::write(&tool_path, serde_json::to_vec(&definition).unwrap()).unwrap();
+        let original = root.path().join("original tool");
+        let mut export = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"));
+        export
+            .env_clear()
+            .args(["package-native", "--recipe-json"])
+            .arg(&recipe_path)
+            .arg("--tool-json")
+            .arg(&tool_path)
+            .arg("--out")
+            .arg(&original);
+        if method == "POST" {
+            assert!(!export.output().unwrap().status.success());
+            assert!(!original.exists(), "failed opt-in must leave no package");
+            export.arg("--allow-mutating");
+        }
+        let exported = export.output().unwrap();
+        assert!(
+            exported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        let manifest = fs::read(original.join("package.manifest.json")).unwrap();
+        assert!(
+            !export.output().unwrap().status.success(),
+            "never overwrite a package"
+        );
+        assert_eq!(
+            fs::read(original.join("package.manifest.json")).unwrap(),
+            manifest
+        );
+        let moved = root.path().join("moved tool");
+        fs::rename(&original, &moved).unwrap();
+        let installed = root.path().join("moved firstcall-cli");
+        fs::copy(env!("CARGO_BIN_EXE_firstcall-cli"), &installed).unwrap();
+        let before: std::collections::BTreeMap<_, _> = fs::read_dir(&moved)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (path.clone(), fs::read(path).unwrap())
+            })
+            .collect();
+        let mut connect = Command::new(&installed);
+        connect
+            .env_clear()
+            .env("FIRSTCALL_BEARER_TOKEN", SECRET)
+            .args(["connect", "--package"])
+            .arg(&moved);
+        if method == "POST" {
+            let denied = connect.output().unwrap();
+            assert!(!denied.status.success());
+            assert!(denied.stdout.is_empty());
+            connect.arg("--allow-mutating");
+        }
+        let connected = connect.output().unwrap();
+        assert!(
+            connected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&connected.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&connected.stdout).contains(SECRET));
+        assert_eq!(
+            connect.output().unwrap().stdout,
+            connected.stdout,
+            "refresh is repeatable"
+        );
+        let config: Value = serde_json::from_slice(&connected.stdout).unwrap();
+        let config = &config["mcpServers"]["find_user"];
+        assert_eq!(
+            config["command"],
+            fs::canonicalize(&installed).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            config["args"][2],
+            fs::canonicalize(&moved).unwrap().to_str().unwrap()
+        );
+        assert_eq!(config["env"]["FIRSTCALL_BEARER_TOKEN"], "");
+        for (path, bytes) in &before {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "export and connect must not make HTTP requests"
+        );
+        listener.set_nonblocking(false).unwrap();
+        let handle = server(
+            listener,
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            r#"{"id":"fixture"}"#.into(),
+        );
+        let mut process = Command::new(config["command"].as_str().unwrap());
+        process
+            .env_clear()
+            .env("FIRSTCALL_BEARER_TOKEN", SECRET)
+            .args(
+                config["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|arg| arg.as_str().unwrap()),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = process.spawn().unwrap();
+        let mut messages = handshake();
+        messages.push(call(2, json!({"user_id":"fixture"})));
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                messages
+                    .iter()
+                    .map(|m| format!("{m}\n"))
+                    .collect::<String>()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: Value = serde_json::from_str(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            response["result"]["structuredContent"]["data"]["id"],
+            "fixture"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+        handle.join().unwrap();
+        fs::write(moved.join("tool.json"), b"{}").unwrap();
+        let tampered = connect.output().unwrap();
+        assert!(!tampered.status.success());
+        assert!(
+            tampered.stdout.is_empty(),
+            "never print a config for a corrupt package"
+        );
+        assert!(!connect.arg("--typo").output().unwrap().status.success());
+    }
+}
+
+#[test]
 fn options_export_requires_opt_in_and_generated_configuration_runs_successfully() {
     native_export_round_trip("OPTIONS");
 }

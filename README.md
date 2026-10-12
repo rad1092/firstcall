@@ -8,7 +8,7 @@ executable runs the tool directly: no generated code to build and no npm setup.
 
 ## Make your first tool
 
-1. Download the [v0.3.0 Apple Silicon Mac archive](https://github.com/rad1092/firstcall-local-api-workbench/releases/tag/v0.3.0), unzip it, and move FirstCall.app to Applications before exporting tools. The companion runtime is included inside the app.
+1. Download the [v0.3.1 Apple Silicon Mac archive](https://github.com/rad1092/firstcall-local-api-workbench/releases/tag/v0.3.1), unzip it, and move FirstCall.app to Applications before exporting tools. The companion runtime is included inside the app.
 2. Open FirstCall and choose **Create a tool**. Paste a curl command or select OpenAPI. **Try an example** loads a public GitHub repository lookup with sample values; no authentication is needed for that example.
 3. Choose **Read request**, review the operation, and enter its inputs. Authentication values stay separate from the tool's ordinary parameters.
 4. Choose **Send and verify**. This sends a real request to the selected API. A successful response enables **Continue to MCP tool**.
@@ -22,7 +22,7 @@ request worked at that time; every MCP tool call makes a new API request.
 
 ## Current release scope
 
-v0.3.0 includes an Apple Silicon macOS app and CLI. The bundle is ad-hoc signed
+v0.3.1 includes an Apple Silicon macOS app and CLI. The bundle is ad-hoc signed
 for integrity and is not Apple notarized. Windows, Linux, and Intel Mac binaries
 are not included in this release; older releases remain available. The runtime
 allows GET and HEAD by default, requires explicit opt-in for other methods,
@@ -65,3 +65,23 @@ advanced CLI packaging workflow; they are not required for desktop exports.
 To build from source, see [Build surfaces](docs/build-surfaces.md). Rust is needed
 for source development, not for running a release download. Parser coverage and
 limits are documented in [Support boundaries](docs/support-boundaries.md).
+
+## Refresh a moved connection
+
+After moving a package or FirstCall installation, use the CLI at its new location:
+
+```sh
+/path/to/firstcall-cli connect --package /absolute/path/to/moved-tool
+```
+
+Copy the emitted server entry into your MCP client and fill in its empty
+credential placeholders. This validates the package using the same checks as
+`serve`; it makes no API request and does not rewrite the package. Write tools
+still require `--allow-mutating`. The CLI can also create a native package from
+a verified recipe and explicit tool definition with `package-native`.
+See [CLI usage](docs/cli-lifecycle.md) and the [reproducible FastMCP comparison](docs/OPENAPI-COMPARISON.md).
+
+Optional query and header inputs may be left blank during verification; their
+whole parameter is omitted from the request. Supplied values and literal fields
+are retained. Required inputs and undeclared placeholders still fail before HTTP.
+Verification preserves the optional input contract for subsequent MCP calls.

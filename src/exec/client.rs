@@ -13,9 +13,9 @@ use crate::exec::classifier::classify_outcome;
 use crate::exec::validation::validate_json_schema;
 use crate::model::{
     AppSettings, AuthStyle, Blocker, BodyTemplate, ExecutionResult, KeyValueField, RenderedHeader,
-    RenderedRequest, RequestDraft, ResponseSnapshot,
+    RenderedRequest, RequestDraft, ResponseSnapshot, RuntimeSlot, SlotLocation,
 };
-use crate::util::{looks_like_slot_value, replace_slots};
+use crate::util::{extract_slot_names, looks_like_slot_value, replace_slots};
 
 pub mod bounded;
 
@@ -196,6 +196,15 @@ fn prepare_request(draft: &RequestDraft) -> Result<PreparedRequest> {
 
     let mut url = build_url(base_url, &rendered_path)?;
     for item in &draft.query {
+        if omit_unset_optional_field(
+            &item.value,
+            item.required,
+            &draft.slots,
+            &slot_values,
+            SlotLocation::Query,
+        ) {
+            continue;
+        }
         let value = render_value(
             &item.value,
             &slot_values,
@@ -206,6 +215,15 @@ fn prepare_request(draft: &RequestDraft) -> Result<PreparedRequest> {
 
     let mut headers = Vec::<(String, String)>::new();
     for header in &draft.headers {
+        if omit_unset_optional_field(
+            &header.value,
+            header.required,
+            &draft.slots,
+            &slot_values,
+            SlotLocation::Header,
+        ) {
+            continue;
+        }
         let value = render_value(
             &header.value,
             &slot_values,
@@ -272,6 +290,31 @@ fn collect_slot_values(draft: &RequestDraft) -> Result<HashMap<String, String>> 
         }
     }
     Ok(values)
+}
+
+// An absent optional parameter is omitted as a whole, including a composed
+// template. Unknown placeholders and required fields must still fail closed.
+fn omit_unset_optional_field(
+    template: &str,
+    required: bool,
+    slots: &[RuntimeSlot],
+    values: &HashMap<String, String>,
+    location: SlotLocation,
+) -> bool {
+    if required {
+        return false;
+    }
+    let names = extract_slot_names(template);
+    let missing: Vec<_> = names
+        .iter()
+        .filter(|name| !values.contains_key(*name))
+        .collect();
+    !missing.is_empty()
+        && missing.iter().all(|name| {
+            slots.iter().any(|slot| {
+                slot.name.as_str() == name.as_str() && !slot.required && slot.location == location
+            })
+        })
 }
 
 fn render_value(template: &str, values: &HashMap<String, String>, label: &str) -> Result<String> {
