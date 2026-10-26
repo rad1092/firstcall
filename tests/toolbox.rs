@@ -12,6 +12,19 @@ use firstcall::model::{AuthStyle, BodyTemplate, Confidence, Recipe, RuntimeSlot,
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+/// Child processes start with an empty environment, except that Windows cannot
+/// open sockets without SystemRoot, so that one variable is kept there.
+fn system_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    if cfg!(windows) {
+        ["SystemRoot"]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn slot(name: &str, location: SlotLocation) -> RuntimeSlot {
     RuntimeSlot {
         name: name.into(),
@@ -109,6 +122,7 @@ fn serve(args: &[&str], messages: &[Value], env: &[(&str, &str)]) -> (Output, Ve
     let mut command = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"));
     command
         .env_clear()
+        .envs(system_env())
         .arg("serve")
         .args(args)
         .stdin(Stdio::piped())
