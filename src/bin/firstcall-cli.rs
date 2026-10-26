@@ -46,34 +46,46 @@ fn run() -> Result<()> {
             Ok(())
         }
         "serve" | "connect" => {
-            let mut package = None;
+            let mut packages = Vec::new();
             let mut allow_mutating = false;
             let mut index = 1;
             while index < args.len() {
                 match args[index].as_str() {
-                    "--package" if package.is_none() => {
+                    "--package" => {
                         index += 1;
                         let value = args.get(index).context("--package requires a directory")?;
                         if value.starts_with("--") {
                             bail!("--package requires a directory");
                         }
-                        package = Some(PathBuf::from(value));
+                        packages.push(PathBuf::from(value));
+                    }
+                    "--toolbox" => {
+                        index += 1;
+                        let value = args.get(index).context("--toolbox requires a directory")?;
+                        if value.starts_with("--") {
+                            bail!("--toolbox requires a directory");
+                        }
+                        packages.extend(firstcall::mcp::toolbox_packages(Path::new(value))?);
                     }
                     "--allow-mutating" if !allow_mutating => allow_mutating = true,
-                    _ => bail!("{command} accepts --package DIR and optional --allow-mutating"),
+                    _ => bail!(
+                        "{command} accepts one or more --package DIR, --toolbox DIR, and optional --allow-mutating"
+                    ),
                 }
                 index += 1;
             }
-            let package = package.with_context(|| format!("{command} requires --package DIR"))?;
+            if packages.is_empty() {
+                bail!("{command} requires --package DIR or --toolbox DIR");
+            }
             let options = firstcall::mcp::ServeOptions { allow_mutating };
             if command == "connect" {
                 println!(
                     "{}",
-                    firstcall::mcp::client_config(&package, &std::env::current_exe()?, options)?
+                    firstcall::mcp::client_config(&packages, &std::env::current_exe()?, options)?
                 );
                 Ok(())
             } else {
-                firstcall::mcp::serve_stdio(&package, options)
+                firstcall::mcp::serve_stdio(&packages, options)
             }
         }
         "package-native" => {
@@ -1274,8 +1286,9 @@ fn print_help() {
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
-  firstcall-cli serve --package DIR [--allow-mutating]
-  firstcall-cli connect --package DIR [--allow-mutating]
+  firstcall-cli serve --package DIR [--package DIR ...] [--allow-mutating]
+  firstcall-cli serve --toolbox DIR [--allow-mutating]
+  firstcall-cli connect --package DIR [--package DIR ...] | --toolbox DIR [--allow-mutating]
   firstcall-cli package-native --recipe-json FILE --tool-json FILE --out DIR [--allow-mutating]
   firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--json]

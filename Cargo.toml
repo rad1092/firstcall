@@ -15,7 +15,7 @@ name = "firstcall-cli"
 path = "src/bin/firstcall-cli.rs"
 
 [features]
-default = ["desktop"]
+default = ["desktop", "native-keyring"]
 desktop = ["dep:eframe", "dep:egui", "dep:rfd"]
 native-keyring = [
     "dep:keyring",

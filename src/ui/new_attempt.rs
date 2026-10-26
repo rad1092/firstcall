@@ -159,7 +159,7 @@ impl FirstCallApp {
                                             continue;
                                         }
 
-                                        ui.strong(format!("{} inputs", location.label()));
+                                        ui.strong(location.heading());
                                         for index in indexes {
                                             let slot = &slots[index];
                                             ui.horizontal(|ui| {
@@ -186,7 +186,7 @@ impl FirstCallApp {
                                                 ui.vertical(|ui| {
                                                     ui.add_enabled(
                                                         !is_running,
-                                                        egui::TextEdit::singleline(entry)
+                                                        crate::app::text_field(entry)
                                                             .password(true)
                                                             .desired_width(f32::INFINITY)
                                                             .hint_text("enter secret value"),
@@ -210,7 +210,7 @@ impl FirstCallApp {
                                                 if ui
                                                     .add_enabled(
                                                         !is_running,
-                                                        egui::TextEdit::singleline(&mut value)
+                                                        crate::app::text_field(&mut value)
                                                             .desired_width(f32::INFINITY),
                                                     )
                                                     .changed()
@@ -331,17 +331,17 @@ impl FirstCallApp {
 
                 ui.add_enabled_ui(!is_running, |ui| {
                     ui.label("Operation name");
-                    ui.add(egui::TextEdit::singleline(&mut draft.name).desired_width(f32::INFINITY));
-                    ui.horizontal(|ui| { ui.label("Method"); ui.add(egui::TextEdit::singleline(&mut draft.method).desired_width(90.0)); });
+                    ui.add(crate::app::text_field(&mut draft.name).desired_width(f32::INFINITY));
+                    ui.horizontal(|ui| { ui.label("Method"); ui.add(crate::app::text_field(&mut draft.method).desired_width(90.0)); });
                     ui.label("Base URL");
                         if draft.base_url.is_none() {
                             draft.base_url = Some(String::new());
                         }
                         if let Some(base_url) = &mut draft.base_url {
-                            ui.add(egui::TextEdit::singleline(base_url).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+                            ui.add(crate::app::text_field(base_url).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                         }
                     ui.label("Path");
-                    ui.add(egui::TextEdit::singleline(&mut draft.path).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+                    ui.add(crate::app::text_field(&mut draft.path).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
 
                     ui.collapsing("Headers", |ui| {
                         edit_headers(ui, &mut draft.headers);
@@ -402,7 +402,9 @@ fn render_result(ui: &mut egui::Ui, result: Option<&crate::model::ExecutionResul
     };
     ui.label(egui::RichText::new(label).strong().color(color));
     if let Some(blocker) = &result.blocker {
-        ui.small(blocker.label());
+        let (what, next) = blocker.guidance();
+        ui.label(egui::RichText::new(what).strong());
+        ui.label(next);
     }
     if !result.notes.is_empty() {
         ui.small(&result.notes);
@@ -469,12 +471,12 @@ fn edit_headers(ui: &mut egui::Ui, headers: &mut Vec<HeaderField>) {
     for (index, header) in headers.iter_mut().enumerate() {
         ui.group(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut header.key)
+                crate::app::text_field(&mut header.key)
                     .hint_text("Header name")
                     .desired_width(f32::INFINITY),
             );
             ui.add(
-                egui::TextEdit::singleline(&mut header.value)
+                crate::app::text_field(&mut header.value)
                     .hint_text("Header value")
                     .desired_width(f32::INFINITY),
             );
@@ -502,12 +504,12 @@ fn edit_query(ui: &mut egui::Ui, query: &mut Vec<KeyValueField>) {
     for (index, item) in query.iter_mut().enumerate() {
         ui.group(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut item.key)
+                crate::app::text_field(&mut item.key)
                     .hint_text("Parameter name")
                     .desired_width(f32::INFINITY),
             );
             ui.add(
-                egui::TextEdit::singleline(&mut item.value)
+                crate::app::text_field(&mut item.value)
                     .hint_text("Parameter value")
                     .desired_width(f32::INFINITY),
             );

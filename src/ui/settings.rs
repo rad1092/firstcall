@@ -42,9 +42,9 @@ impl FirstCallApp {
             if let Some(warning) = &self.secret_status.warning {
                 ui.colored_label(egui::Color32::YELLOW, warning);
             }
-            ui.small("session-memory keeps entered GUI secrets only for the current desktop session.");
-            ui.small("native-keyring is optional and feature-gated by the native-keyring Cargo feature; it may fall back to session-memory when unavailable.");
-            ui.small("firstcall-cli verification remains environment-first and does not read GUI keyring or session-memory secrets.");
+            ui.small("Tokens you save are kept in the OS keychain (macOS Keychain, Windows Credential Manager, or the Linux kernel keyring), per API.");
+            ui.small("Exported tools read the saved token for their API. An environment variable set in your MCP client overrides it.");
+            ui.small("If the keychain is unavailable, tokens last only until FirstCall closes.");
             if let Some(warning) = &self.bootstrap_warning {
                 ui.colored_label(egui::Color32::YELLOW, warning);
             }

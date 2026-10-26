@@ -2,7 +2,9 @@
 
 `firstcall-cli` is the automation surface for agents, CI, and local scripts. It owns recipe verification, package export, package validation and inspection, package import, local recipe summaries, and JSON reports.
 
-CLI verification is environment-first. It does not read GUI keyring or session-memory secrets.
+`verify` reads credentials from the environment. `serve` reads them from the
+environment first, then from the OS keychain entry the desktop app saved for the
+tool's API.
 
 ## Run an exported MCP tool
 
@@ -15,10 +17,25 @@ runs the release executable directly:
 ```
 
 The process speaks MCP over stdin/stdout; it is intended to be started by an MCP
-client. No Node.js, npm installation, or build is needed. Authentication comes
-from the environment of that process. The exported configuration lists the
-required names with empty values for you to supply in your client's settings.
+client. No Node.js, npm installation, or build is needed. The exported
+configuration lists the credential variables with empty values. Leave them empty
+to use the token saved in FirstCall for that API, or fill them to override it.
 Do not put credential values in the package files.
+
+## Serve several tools from one server
+
+```sh
+firstcall-cli serve --package ./find_user --package ./find_repo
+firstcall-cli serve --toolbox /path/to/exports
+firstcall-cli connect --toolbox /path/to/exports
+```
+
+`--toolbox` serves every exported tool directly inside the folder. Tool names must
+be unique. For credentials, each tool first reads `NAME__TOOL`, for example
+`FIRSTCALL_BEARER_TOKEN__FIND_REPO`. It reads the plain `FIRSTCALL_BEARER_TOKEN`
+only when no tool for a different API in the same server needs that variable, so
+one API's token is never sent to another. `connect` writes one `firstcall` server
+entry listing the variables that apply.
 
 Methods other than GET and HEAD require an explicit `--allow-mutating` runtime option. The GUI
 adds that option only after you enable write requests for the exported tool.
@@ -33,8 +50,9 @@ does not modify recipe storage while serving a package.
 
 ```text
 firstcall-cli version
-firstcall-cli serve --package PATH [--allow-mutating]
-firstcall-cli connect --package PATH [--allow-mutating]
+firstcall-cli serve --package PATH [--package PATH ...] [--allow-mutating]
+firstcall-cli serve --toolbox DIR [--allow-mutating]
+firstcall-cli connect --package PATH [--package PATH ...] | --toolbox DIR [--allow-mutating]
 firstcall-cli package-native --recipe-json PATH --tool-json PATH --out DIR [--allow-mutating]
 firstcall-cli explain --recipe-json PATH
 firstcall-cli package --recipe-json PATH --out DIR
