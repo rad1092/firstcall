@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -21,8 +21,9 @@ use crate::export::native_package::{
 use crate::export::{curl::recipe_to_curl, json::recipe_to_json, markdown::recipe_to_markdown};
 use crate::merge::merge_parsed_sources;
 use crate::model::{
-    AppSettings, AttemptListItem, ExecutionResult, Outcome, ParsedSource, Recipe, RecipeListItem,
-    RequestAttempt, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
+    AppSettings, AttemptListItem, Blocker, ExecutionResult, Outcome, ParsedSource, Recipe,
+    RecipeListItem, RequestAttempt, RequestDraft, RuntimeSlot, SlotLocation, SourceInput,
+    SourceKind,
 };
 use crate::parse::{
     bruno::parse_bruno_input, curl::parse_curl_input, docs::parse_docs_input, har::parse_har_input,
@@ -32,7 +33,9 @@ use crate::parse::{
 use crate::store::db::{AppPaths, open_database};
 use crate::store::migrations::run_migrations;
 use crate::store::repos::AppRepository;
-use crate::store::secrets::{SecretStore, SecretStoreStatus, default_secret_store};
+use crate::store::secrets::{
+    SecretStore, SecretStoreStatus, default_secret_store, scoped_secret_key, secret_origin,
+};
 use crate::util::SAMPLE_DOCS;
 
 const PUBLIC_SAMPLE_CURL: &str = r#"curl 'https://api.github.com/repos/{{owner}}/{{repository}}' \
@@ -73,6 +76,7 @@ pub fn configure_theme(ctx: &egui::Context) {
     let navy = Color32::from_rgb(24, 42, 67);
     let blue = Color32::from_rgb(37, 87, 187);
     let line = Color32::from_rgb(213, 222, 235);
+    let field_line = Color32::from_rgb(170, 186, 210);
     let mut style = (*ctx.global_style()).clone();
     style
         .text_styles
@@ -115,7 +119,7 @@ pub fn configure_theme(ctx: &egui::Context) {
         &mut style.visuals.widgets.open,
     ] {
         visuals.corner_radius = CornerRadius::same(7);
-        visuals.bg_stroke = Stroke::new(1.0_f32, line);
+        visuals.bg_stroke = Stroke::new(1.0_f32, field_line);
         visuals.fg_stroke = Stroke::new(1.0_f32, navy);
     }
     style.visuals.widgets.inactive.bg_fill = Color32::WHITE;
@@ -133,6 +137,60 @@ pub(crate) fn primary_button(label: &str) -> egui::Button<'_> {
         .fill(egui::Color32::from_rgb(37, 87, 187))
         .stroke(egui::Stroke::NONE)
         .min_size(egui::vec2(0.0, 40.0))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusLevel {
+    #[default]
+    Info,
+    Success,
+    Error,
+}
+
+impl StatusLevel {
+    fn colors(self) -> (egui::Color32, egui::Color32) {
+        use egui::Color32;
+        match self {
+            Self::Info => (
+                Color32::from_rgb(237, 244, 254),
+                Color32::from_rgb(40, 74, 121),
+            ),
+            Self::Success => (
+                Color32::from_rgb(232, 246, 239),
+                Color32::from_rgb(24, 96, 70),
+            ),
+            Self::Error => (
+                Color32::from_rgb(253, 236, 236),
+                Color32::from_rgb(140, 32, 42),
+            ),
+        }
+    }
+}
+
+/// The banner text after a request: the outcome, the reason, and the next step.
+pub(crate) fn execution_status(
+    outcome: &Outcome,
+    blocker: Option<&Blocker>,
+) -> (String, StatusLevel) {
+    match (outcome, blocker) {
+        (Outcome::Success, _) => (
+            "Request verified. Continue to MCP tool to describe and export it.".to_string(),
+            StatusLevel::Success,
+        ),
+        (_, Some(blocker)) => {
+            let (what, next) = blocker.guidance();
+            (format!("{what} {next}"), StatusLevel::Error)
+        }
+        (_, None) => (
+            "The request didn't succeed. Look at the response on the right.".to_string(),
+            StatusLevel::Error,
+        ),
+    }
+}
+
+/// Text inputs with enough padding that they read as fields, not labels.
+pub(crate) fn text_field(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(8, 6))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +385,9 @@ pub struct FirstCallApp {
     pub secret_status: SecretStoreStatus,
     pub http_client: Client,
     pub status_message: Option<String>,
+    /// How the status banner is colored, for the message it was set with.
+    pub status_level: StatusLevel,
+    status_level_message: Option<String>,
     pub bootstrap_warning: Option<String>,
     running_execution: Option<RunningExecution>,
 }
@@ -379,6 +440,8 @@ impl FirstCallApp {
             secret_status,
             http_client,
             status_message: bootstrap_warning.clone(),
+            status_level: StatusLevel::Info,
+            status_level_message: None,
             bootstrap_warning,
             running_execution: None,
         };
@@ -573,8 +636,10 @@ impl FirstCallApp {
             self.last_execution = Some(result);
             self.refresh_lists();
             if let Some(result) = &self.last_execution {
-                self.status_message =
-                    Some(format!("Request finished with {}", result.outcome.label()));
+                let (message, level) = execution_status(&result.outcome, result.blocker.as_ref());
+                self.status_level_message = Some(message.clone());
+                self.status_message = Some(message);
+                self.status_level = level;
             }
         }
     }
@@ -752,6 +817,15 @@ impl FirstCallApp {
         Ok(exported)
     }
 
+    /// Export into FirstCall's own data folder, so moving the app doesn't break tools.
+    pub(crate) fn export_native_tool_to_default_folder(&mut self) {
+        let Some(editor) = self.tool_editor.as_ref() else {
+            return;
+        };
+        let destination = unused_folder(&self.paths.exports_dir, &editor.definition.name);
+        self.export_native_tool_into(destination);
+    }
+
     pub(crate) fn choose_native_export_folder(&mut self) {
         let Some(editor) = self.tool_editor.as_ref() else {
             return;
@@ -763,19 +837,42 @@ impl FirstCallApp {
             return;
         };
         let destination = parent.join(&editor.definition.name);
-        let cli_path = std::env::current_exe().map(|path| {
-            path.with_file_name(if cfg!(windows) {
-                "firstcall-cli.exe"
-            } else {
-                "firstcall-cli"
-            })
-        });
-        match cli_path
-            .context("Could not find the FirstCall installation")
-            .and_then(|path| self.export_native_tool_to(&destination, &path))
+        self.export_native_tool_into(destination);
+    }
+
+    fn export_native_tool_into(&mut self, destination: PathBuf) {
+        match companion_cli_path().and_then(|path| self.export_native_tool_to(&destination, &path))
         {
             Ok(_) => {}
             Err(error) => self.status_message = Some(format!("Could not export MCP tool: {error}")),
+        }
+    }
+
+    /// One MCP server entry for every tool in FirstCall's export folder.
+    pub(crate) fn copy_toolbox_configuration(&mut self, ctx: &egui::Context) {
+        let result = companion_cli_path().and_then(|cli| {
+            let packages = crate::mcp::toolbox_packages(&self.paths.exports_dir)?;
+            let count = packages.len();
+            let config =
+                crate::mcp::client_config(&packages, &cli, crate::mcp::ServeOptions::default())
+                    .context("Tools that send write requests have to be connected one at a time")?;
+            Ok((config, count))
+        });
+        match result {
+            Ok((config, count)) => {
+                ctx.copy_text(config);
+                self.status_message = Some(if count == 1 {
+                    "Configuration copied. Export more tools to serve them from the same entry."
+                        .to_string()
+                } else {
+                    format!(
+                        "Configuration for {count} tools copied. Replace the separate FirstCall entries in your AI client with it."
+                    )
+                });
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Could not build the configuration: {error:#}"))
+            }
         }
     }
 
@@ -877,6 +974,7 @@ impl FirstCallApp {
                     && !slot_has_runtime_value(
                         slot,
                         self.secret_store.as_ref(),
+                        draft_secret_origin(draft).as_deref(),
                         &self.auth_slot_inputs,
                     )
             })
@@ -884,7 +982,17 @@ impl FirstCallApp {
     }
 
     pub(crate) fn auth_slot_is_stored(&self, slot_name: &str) -> bool {
-        self.secret_store.get(slot_name).is_some()
+        let origin = self.working_draft.as_ref().and_then(draft_secret_origin);
+        stored_secret(self.secret_store.as_ref(), origin.as_deref(), slot_name).is_some()
+    }
+
+    /// New credentials are saved per API origin so `firstcall-cli serve` can
+    /// read them for that API only. Without a base URL, fall back to the slot name.
+    fn secret_key_for(&self, slot_name: &str) -> String {
+        match self.working_draft.as_ref().and_then(draft_secret_origin) {
+            Some(origin) => scoped_secret_key(&origin, slot_name),
+            None => slot_name.to_string(),
+        }
     }
 
     pub(crate) fn store_auth_slot_value(&mut self, slot_name: &str, value: String) {
@@ -892,8 +1000,8 @@ impl FirstCallApp {
             return;
         }
         if !value.trim().is_empty() {
-            self.secret_store
-                .set(slot_name, SecretString::new(value.into()));
+            let key = self.secret_key_for(slot_name);
+            self.secret_store.set(&key, SecretString::new(value.into()));
             self.secret_status = self.secret_store.status();
             self.status_message = Some(format!("Stored secret for runtime slot `{slot_name}`"));
         }
@@ -903,8 +1011,8 @@ impl FirstCallApp {
         let pending = std::mem::take(&mut self.auth_slot_inputs);
         for (slot_name, value) in pending {
             if !value.trim().is_empty() {
-                self.secret_store
-                    .set(&slot_name, SecretString::new(value.into()));
+                let key = self.secret_key_for(&slot_name);
+                self.secret_store.set(&key, SecretString::new(value.into()));
             }
         }
     }
@@ -998,20 +1106,34 @@ impl eframe::App for FirstCallApp {
                         }
                     });
                 }
-                if let Some(message) = &self.status_message {
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(237, 244, 254))
-                        .corner_radius(7)
-                        .inner_margin(egui::Margin::symmetric(12, 8))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                egui::RichText::new(message)
-                                    .size(14.0)
-                                    .color(egui::Color32::from_rgb(40, 74, 121)),
-                            );
-                        });
-                }
+                // The banner row is always there, so messages don't push the panels down.
+                let message = self.status_message.as_deref();
+                let level = if self.status_message == self.status_level_message {
+                    self.status_level
+                } else if message
+                    .is_some_and(|m| m.starts_with("Could not") || m.starts_with("Cannot"))
+                {
+                    StatusLevel::Error
+                } else {
+                    StatusLevel::Info
+                };
+                let (fill, text) = level.colors();
+                egui::Frame::new()
+                    .fill(if message.is_some() {
+                        fill
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .corner_radius(7)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(message.unwrap_or(" "))
+                                .size(14.0)
+                                .color(text),
+                        );
+                    });
             });
 
         match self.screen {
@@ -1021,6 +1143,30 @@ impl eframe::App for FirstCallApp {
             TopScreen::Settings => self.render_settings(root_ui),
         }
     }
+}
+
+/// The `firstcall-cli` that ships next to the desktop app.
+fn companion_cli_path() -> anyhow::Result<PathBuf> {
+    std::env::current_exe()
+        .map(|path| {
+            path.with_file_name(if cfg!(windows) {
+                "firstcall-cli.exe"
+            } else {
+                "firstcall-cli"
+            })
+        })
+        .context("Could not find the FirstCall installation")
+}
+
+/// `parent/name`, or `parent/name-2`, `-3`, ... if that folder already exists.
+fn unused_folder(parent: &std::path::Path, name: &str) -> PathBuf {
+    let mut candidate = parent.join(name);
+    let mut number = 2;
+    while candidate.exists() {
+        candidate = parent.join(format!("{name}-{number}"));
+        number += 1;
+    }
+    candidate
 }
 
 fn bootstrap_repository(
@@ -1272,11 +1418,27 @@ fn attempt_from_executed_draft(
     }
 }
 
+fn draft_secret_origin(draft: &RequestDraft) -> Option<String> {
+    draft.base_url.as_deref().and_then(secret_origin)
+}
+
+/// Prefer the credential saved for this API; older versions saved by slot name only.
+fn stored_secret(
+    secret_store: &dyn SecretStore,
+    origin: Option<&str>,
+    slot_name: &str,
+) -> Option<SecretString> {
+    origin
+        .and_then(|origin| secret_store.get(&scoped_secret_key(origin, slot_name)))
+        .or_else(|| secret_store.get(slot_name))
+}
+
 fn hydrate_auth_slots(draft: &mut RequestDraft, secret_store: &dyn SecretStore) {
+    let origin = draft_secret_origin(draft);
     for slot in &mut draft.slots {
         if slot.location == SlotLocation::Auth
             && slot.current_value.as_deref().unwrap_or("").is_empty()
-            && let Some(secret) = secret_store.get(&slot.name)
+            && let Some(secret) = stored_secret(secret_store, origin.as_deref(), &slot.name)
         {
             slot.current_value = Some(secret.expose_secret().to_string());
         }
@@ -1302,6 +1464,7 @@ fn clear_visible_auth_slots(draft: &mut RequestDraft) {
 fn slot_has_runtime_value(
     slot: &RuntimeSlot,
     secret_store: &dyn SecretStore,
+    origin: Option<&str>,
     auth_slot_inputs: &BTreeMap<String, String>,
 ) -> bool {
     if slot.location == SlotLocation::Auth {
@@ -1309,7 +1472,7 @@ fn slot_has_runtime_value(
             .get(&slot.name)
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
-            || secret_store.get(&slot.name).is_some()
+            || stored_secret(secret_store, origin, &slot.name).is_some()
     } else {
         !slot
             .current_value
@@ -1823,6 +1986,8 @@ mod tests {
             secret_status,
             http_client: Client::new(),
             status_message: None,
+            status_level: StatusLevel::Info,
+            status_level_message: None,
             bootstrap_warning: None,
             running_execution: None,
         }

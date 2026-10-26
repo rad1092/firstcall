@@ -2,86 +2,110 @@
 
 Turn an API request into a tool your AI client can actually call.
 
-Bring a curl command or an OpenAPI operation, verify it against the API, describe
-what the tool does, and export a local MCP connection. FirstCall's companion
-executable runs the tool directly: no generated code to build and no npm setup.
+![FirstCall checking a GitHub API request and turning it into an MCP tool](docs/assets/firstcall.gif)
+
+Paste a request, send it once with real inputs, describe what it does, and export
+it as a local MCP tool. The app includes the command-line runner that serves the
+tool, so there is no generated code to build and no npm or Python setup. Tokens
+you save stay in your OS keychain.
 
 ## Make your first tool
 
-1. Download the [v0.3.1 Apple Silicon Mac archive](https://github.com/rad1092/firstcall-local-api-workbench/releases/tag/v0.3.1), unzip it, and move FirstCall.app to Applications before exporting tools. The companion runtime is included inside the app.
-2. Open FirstCall and choose **Create a tool**. Paste a curl command or select OpenAPI. **Try an example** loads a public GitHub repository lookup with sample values; no authentication is needed for that example.
-3. Choose **Read request**, review the operation, and enter its inputs. Authentication values stay separate from the tool's ordinary parameters.
-4. Choose **Send and verify**. This sends a real request to the selected API. A successful response enables **Continue to MCP tool**.
-5. Give the tool a useful name, explain when the AI should use it and what it returns, and describe its inputs. Text, integer, number, and boolean inputs are supported. Write operations require an explicit per-export opt-in.
-6. Choose **Export MCP package**. FirstCall creates a new folder, verifies its files and request policy, and shows **Copy connection configuration** and **Open package folder**.
-7. Add that server entry to your AI client's local MCP settings. Fill any empty authentication environment values in the client's settings, then restart its MCP connection. Ask the client to call your named tool.
+1. Download FirstCall from the [latest release](https://github.com/rad1092/firstcall/releases/latest).
+   On a Mac, move FirstCall.app to Applications.
+2. Choose **Create a tool** and paste a request, or choose **Try an example** for a
+   public GitHub lookup that needs no token.
+3. Choose **Read request**, check the operation, and fill in its inputs. Tokens go
+   under **Auth inputs** and are saved per API.
+4. Choose **Send and verify**. FirstCall sends the real request and shows the
+   response. If it fails, the banner says why and what to try next.
+5. Choose **Continue to MCP tool**. Name the tool, say when the AI should use it,
+   and describe each input.
+6. Choose **Export MCP package**, then **Copy connection configuration** and add it
+   to your AI client's MCP settings.
 
-The exported tool returns structured, redacted API response data, status, and
-explicit error or size-limit information. Export verification records that the
-request worked at that time; every MCP tool call makes a new API request.
+Every tool call makes a new request to the API. Responses come back as
+structured JSON with secrets redacted.
 
-## Current release scope
+## Bring requests from where you already have them
 
-v0.3.1 includes an Apple Silicon macOS app and CLI. The bundle is ad-hoc signed
-for integrity and is not Apple notarized. Windows, Linux, and Intel Mac binaries
-are not included in this release; older releases remain available. The runtime
-allows GET and HEAD by default, requires explicit opt-in for other methods,
-uses a 30-second timeout, and limits each response body to 256 KiB. Oversized or
-malformed JSON returns an error rather than partial data presented as complete.
+| Source                       | What to paste or open                         |
+| ---------------------------- | --------------------------------------------- |
+| curl                         | A `curl` command, for example from API docs   |
+| OpenAPI                      | A YAML or JSON spec; pick one operation       |
+| HAR                          | Requests saved from your browser's DevTools   |
+| Postman, Bruno               | An exported collection or a `.bru` file       |
+| `.http`, Hurl                | Files from VS Code REST Client, JetBrains, Hurl |
 
-## What leaves your computer
+A HAR file is the quickest way to turn something you just did in the browser into
+a tool: open DevTools, save the network log, and pick the request.
 
-Request verification and MCP tool calls connect directly to the API you chose.
-FirstCall has no cloud backend. Request history and verified recipes use local
-SQLite storage. Exported packages contain environment variable names, not their
-credential values. The MCP runtime reads credentials from its own process
-environment, so a token entered in the GUI must also be supplied in the client's
-local environment when connecting the exported tool.
+## Many tools, one server
 
-Keep the package and application at their exported locations. The connection
-configuration uses absolute paths; export a new configuration if either moves.
-The export preserves existing folders instead of overwriting them.
-
-## What's in the MCP package
-
-- `recipe.yaml`: the request template, input slots, and authentication references
-- `tool.json`: the tool's name, purpose, and input schema
-- `policy.json`: the allowed endpoint and operation
-- `verified.lock.json` and `package.manifest.json`: verification and integrity records
-- `client-config.json`: the local MCP server entry with empty credential placeholders
-- `README.md`: connection instructions for this tool
-
-The connection runs the installed firstcall-cli with the `serve --package`
-command. The native runtime checks the package and its endpoint policy before
-accepting tool calls. It does not follow redirects to another endpoint.
-
-## Command line and existing packages
-
-The CLI also supports verification, saved recipes, package inspection, and
-import. [CLI usage](docs/cli-lifecycle.md) describes those commands and the native
-MCP runtime. Existing TypeScript MCP packages remain available through the
-advanced CLI packaging workflow; they are not required for desktop exports.
-
-To build from source, see [Build surfaces](docs/build-surfaces.md). Rust is needed
-for source development, not for running a release download. Parser coverage and
-limits are documented in [Support boundaries](docs/support-boundaries.md).
-
-## Refresh a moved connection
-
-After moving a package or FirstCall installation, use the CLI at its new location:
+Each export is a folder in FirstCall's data folder. **Copy configuration for all
+exported tools** gives you one MCP server entry that serves all of them, instead
+of one server per tool. From the command line:
 
 ```sh
-/path/to/firstcall-cli connect --package /absolute/path/to/moved-tool
+firstcall-cli connect --toolbox "<FirstCall data folder>/exports"
+firstcall-cli serve --package ./find_user --package ./find_repo
 ```
 
-Copy the emitted server entry into your MCP client and fill in its empty
-credential placeholders. This validates the package using the same checks as
-`serve`; it makes no API request and does not rewrite the package. Write tools
-still require `--allow-mutating`. The CLI can also create a native package from
-a verified recipe and explicit tool definition with `package-native`.
-See [CLI usage](docs/cli-lifecycle.md) and the [reproducible FastMCP comparison](docs/OPENAPI-COMPARISON.md).
+## Tokens
 
-Optional query and header inputs may be left blank during verification; their
-whole parameter is omitted from the request. Supplied values and literal fields
-are retained. Required inputs and undeclared placeholders still fail before HTTP.
-Verification preserves the optional input contract for subsequent MCP calls.
+Tokens you enter in FirstCall are saved in the OS keychain (macOS Keychain,
+Windows Credential Manager, or the Linux kernel keyring), separately for each
+API. Exported tools read the token saved for their API, so you enter it once.
+
+To override a saved token, set the environment variable listed in the
+connection configuration. When one server serves tools for different APIs, each
+tool's variable ends in its name, for example `FIRSTCALL_BEARER_TOKEN__FIND_REPO`,
+so one API's token is never sent to another.
+
+## What it allows
+
+- GET and HEAD only, unless you allow write requests for a tool when exporting.
+- Only the endpoint the tool was exported for. Redirects to other endpoints are not followed.
+- A 30-second timeout and 256 KiB per response. Oversized or malformed JSON is an
+  error, not a partial answer.
+
+FirstCall has no cloud backend. Request history and verified requests are stored
+in a local SQLite database.
+
+## What's in an exported tool
+
+- `tool.json`: the tool's name, purpose and input schema
+- `recipe.yaml`: the request template and its inputs
+- `policy.json`: the one endpoint and method it may call
+- `verified.lock.json`, `package.manifest.json`: verification and integrity records
+- `client-config.json`: the MCP server entry, with empty credential variables
+
+## Command line
+
+The same `firstcall-cli` verifies requests, inspects and imports packages, and
+serves tools. See [CLI usage](docs/cli-lifecycle.md).
+
+If you move the app or a tool folder, rebuild the connection from the new location:
+
+```sh
+/path/to/firstcall-cli connect --package /path/to/tool
+```
+
+FirstCall is built for the handful of API calls you actually use, each checked
+by hand before an AI can call it. To expose every operation of a large OpenAPI
+spec at once, a generator such as FastMCP fits better; see the
+[comparison](docs/OPENAPI-COMPARISON.md).
+
+## Build from source
+
+Rust stable. `cargo build --release` builds the app and the CLI. See
+[Build surfaces](docs/build-surfaces.md) and [Support boundaries](docs/support-boundaries.md).
+
+## Limitations
+
+- On Linux the kernel keyring forgets saved tokens when you log out. Use environment
+  variables there if you need them to persist.
+- On macOS, the first time an exported tool reads a saved token, macOS asks whether
+  `firstcall-cli` may use it. Choose Always Allow.
+- macOS may ask you to confirm the first launch of the app in System Settings,
+  Privacy & Security.

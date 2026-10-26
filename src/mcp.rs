@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -15,9 +15,11 @@ use serde_json::{Map, Value, json};
 
 use crate::exec::client::bounded::execute_request_bounded;
 use crate::exec::redact::{REDACTED, is_secret_key, redact_free_text};
+use crate::export::native_package::required_environment;
 use crate::export::package_import::recipe_from_agent_package_dir;
 use crate::export::package_inspect::inspect_agent_package_dir;
 use crate::model::{AuthStyle, BodyTemplate, Recipe, RuntimeSlot, SlotLocation};
+use crate::store::secrets::read_saved_secret;
 use crate::util::{extract_slot_names, replace_slots};
 use crate::verify::prepare_draft_for_verify_with_env;
 
@@ -26,6 +28,8 @@ pub const MAX_RESPONSE_BYTES: usize = 262_144;
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_PACKAGE_FILE_BYTES: u64 = 1_048_576;
 const PROTOCOL_VERSION: &str = "2025-11-25";
+/// One server process can serve this many exported tools.
+pub const MAX_TOOLBOX_TOOLS: usize = 64;
 const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
 
 #[derive(Clone, Copy, Default)]
@@ -51,24 +55,150 @@ struct PackageTool {
     response_secret_keys: BTreeSet<String>,
     client: Client,
     last_request_at: RefCell<Option<Instant>>,
+    /// Suffix for tool-specific credential variables, e.g. `FIRSTCALL_API_KEY__FIND_CUSTOMER`.
+    env_suffix: String,
+    /// Credential variables this tool may read without the suffix: those no tool for
+    /// another API needs, so one process never hands one API's token to another.
+    shared_env: BTreeSet<String>,
 }
 
-pub fn serve_stdio(package: &Path, options: ServeOptions) -> Result<()> {
-    let tool = PackageTool::load(package, options)?;
-    serve(tool, io::stdin().lock(), io::stdout().lock())
+/// Every tool one `serve` process exposes. A single package is a toolbox of one.
+struct Toolbox {
+    tools: Vec<PackageTool>,
+}
+
+impl Toolbox {
+    fn load(packages: &[PathBuf], options: ServeOptions) -> Result<Self> {
+        if packages.is_empty() {
+            bail!("Pass at least one --package DIR");
+        }
+        if packages.len() > MAX_TOOLBOX_TOOLS {
+            bail!("One server can serve at most {MAX_TOOLBOX_TOOLS} tools");
+        }
+        let mut tools = Vec::with_capacity(packages.len());
+        for package in packages {
+            let tool = PackageTool::load(package, options)
+                .with_context(|| format!("Cannot load {}", package.display()))?;
+            if tools
+                .iter()
+                .any(|other: &PackageTool| other.definition.name == tool.definition.name)
+            {
+                bail!(
+                    "Two packages use the tool name `{}`; rename one in FirstCall before serving them together",
+                    tool.definition.name
+                );
+            }
+            tools.push(tool);
+        }
+        let needs: Vec<BTreeSet<String>> = tools
+            .iter()
+            .map(|tool| required_environment(&tool.recipe).into_iter().collect())
+            .collect();
+        for index in 0..tools.len() {
+            let shared = needs[index]
+                .iter()
+                .filter(|name| {
+                    tools.iter().enumerate().all(|(other, tool)| {
+                        other == index
+                            || tool.origin == tools[index].origin
+                            || !needs[other].contains(*name)
+                    })
+                })
+                .cloned()
+                .collect();
+            tools[index].shared_env = shared;
+        }
+        Ok(Self { tools })
+    }
+
+    fn get(&self, name: Option<&str>) -> Option<&PackageTool> {
+        let name = name?;
+        self.tools.iter().find(|tool| tool.definition.name == name)
+    }
+
+    fn descriptors(&self) -> Value {
+        Value::Array(self.tools.iter().map(PackageTool::descriptor).collect())
+    }
+}
+
+/// Credential variable for one tool in a toolbox: `NAME__TOOL_NAME`.
+pub fn tool_env_name(name: &str, tool_name: &str) -> String {
+    format!("{name}__{}", env_suffix(tool_name))
+}
+
+fn env_suffix(tool_name: &str) -> String {
+    tool_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The auth slot whose value a FirstCall credential variable carries.
+fn auth_slot_for_env<'a>(recipe: &'a Recipe, name: &str) -> Option<&'a str> {
+    match (&recipe.auth_style, name) {
+        (AuthStyle::Bearer { token_slot, .. }, "FIRSTCALL_BEARER_TOKEN") => Some(token_slot),
+        (AuthStyle::Basic { username_slot, .. }, "FIRSTCALL_USERNAME") => Some(username_slot),
+        (AuthStyle::Basic { password_slot, .. }, "FIRSTCALL_PASSWORD") => Some(password_slot),
+        (
+            AuthStyle::HeaderApiKey { slot_name, .. } | AuthStyle::QueryApiKey { slot_name, .. },
+            "FIRSTCALL_API_KEY",
+        ) => Some(slot_name),
+        _ => None,
+    }
+}
+
+/// Every exported tool directly inside `dir`, in name order.
+pub fn toolbox_packages(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut packages = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("Cannot read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() && path.join("policy.json").is_file() {
+            packages.push(path);
+        }
+    }
+    packages.sort();
+    if packages.is_empty() {
+        bail!("{} contains no exported tools", dir.display());
+    }
+    Ok(packages)
+}
+
+pub fn serve_stdio(packages: &[PathBuf], options: ServeOptions) -> Result<()> {
+    let toolbox = Toolbox::load(packages, options)?;
+    serve(toolbox, io::stdin().lock(), io::stdout().lock())
 }
 
 /// Refresh connection paths without writing the package, reading credentials,
 /// or making an API request. Use exactly the same admission checks as `serve`.
-pub fn client_config(package: &Path, executable: &Path, options: ServeOptions) -> Result<String> {
+pub fn client_config(
+    packages: &[PathBuf],
+    executable: &Path,
+    options: ServeOptions,
+) -> Result<String> {
     use crate::export::native_package::{
         NativeExportOptions, NativeToolDefinition, native_client_config_with_options,
     };
-    let package = fs::canonicalize(package).context("Cannot resolve package directory")?;
     let executable = fs::canonicalize(executable).context("Cannot resolve FirstCall executable")?;
     if !executable.is_file() {
         bail!("FirstCall executable must be a file");
     }
+    let packages = packages
+        .iter()
+        .map(|package| fs::canonicalize(package).context("Cannot resolve package directory"))
+        .collect::<Result<Vec<_>>>()?;
+    if packages.len() > 1 {
+        return toolbox_client_config(&packages, &executable, options);
+    }
+    let package = packages
+        .into_iter()
+        .next()
+        .context("Pass at least one --package DIR")?;
     let tool = PackageTool::load(&package, options)?;
     let definition = NativeToolDefinition {
         schema_version: tool.definition.schema_version,
@@ -86,6 +216,37 @@ pub fn client_config(package: &Path, executable: &Path, options: ServeOptions) -
             allow_mutating: options.allow_mutating,
         },
     )
+}
+
+/// One `mcpServers` entry named `firstcall` that serves every package.
+fn toolbox_client_config(
+    packages: &[PathBuf],
+    executable: &Path,
+    options: ServeOptions,
+) -> Result<String> {
+    let toolbox = Toolbox::load(packages, options)?;
+    let mut environment = Map::new();
+    let mut args = vec![json!("serve")];
+    let mut mutating = false;
+    for (tool, package) in toolbox.tools.iter().zip(packages) {
+        args.push(json!("--package"));
+        args.push(json!(package));
+        mutating |= !matches!(tool.recipe.method.as_str(), "GET" | "HEAD");
+        for name in required_environment(&tool.recipe) {
+            let key = if tool.shared_env.contains(&name) {
+                name
+            } else {
+                tool_env_name(&name, &tool.definition.name)
+            };
+            environment.insert(key, json!(""));
+        }
+    }
+    if mutating {
+        args.push(json!("--allow-mutating"));
+    }
+    Ok(serde_json::to_string_pretty(&json!({"mcpServers": {
+        "firstcall": {"command": executable, "args": args, "env": environment}
+    }}))?)
 }
 
 impl PackageTool {
@@ -147,6 +308,8 @@ impl PackageTool {
             .connect_timeout(Duration::from_secs(10))
             .build()
             .context("Cannot create HTTP client")?;
+        let env_suffix = env_suffix(&definition.name);
+        let shared_env = required_environment(&recipe).into_iter().collect();
         Ok(Self {
             recipe,
             definition,
@@ -155,7 +318,26 @@ impl PackageTool {
             response_secret_keys,
             client,
             last_request_at: RefCell::new(None),
+            env_suffix,
+            shared_env,
         })
+    }
+
+    /// A credential, in this order: the tool-specific environment variable, the
+    /// shared one if no other API in this server uses it, then the OS keychain
+    /// entry the desktop app saved for this API.
+    fn credential(&self, name: &str) -> Option<String> {
+        let read = |key: &str| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        };
+        read(&format!("{name}__{}", self.env_suffix))
+            .or_else(|| self.shared_env.contains(name).then(|| read(name)).flatten())
+            .or_else(|| {
+                auth_slot_for_env(&self.recipe, name)
+                    .and_then(|slot| read_saved_secret(&self.origin, slot))
+            })
     }
 
     fn descriptor(&self) -> Value {
@@ -237,12 +419,17 @@ impl PackageTool {
         });
         let draft = prepare_draft_for_verify_with_env(&recipe, |name| {
             // Public arguments only come from tools/call, including optional arguments.
-            if recipe.slots.iter().any(|slot| safe_slot(&self.recipe, slot)
-                && crate::verify::slot_env_name(&slot.name) == name) { return None; }
-            let value = std::env::var(name).ok().filter(|value| !value.trim().is_empty());
-            if let Some(value) = &value { secrets.borrow_mut().push(value.clone()); }
+            if recipe.slots.iter().any(|slot| {
+                safe_slot(&self.recipe, slot) && crate::verify::slot_env_name(&slot.name) == name
+            }) {
+                return None;
+            }
+            let value = self.credential(name);
+            if let Some(value) = &value {
+                secrets.borrow_mut().push(value.clone());
+            }
             value
-        }).map_err(|_| anyhow::anyhow!("Missing declared argument or required environment credential; check tool inputs and client environment settings"))?;
+        }).map_err(|_| anyhow::anyhow!("Missing declared argument or required credential; check tool inputs, the client environment, or save the credential in FirstCall"))?;
         // Include derived Basic credentials as exact redaction values too.
         if let AuthStyle::Basic {
             username_slot,
@@ -322,7 +509,7 @@ impl PackageTool {
     }
 }
 
-fn serve(tool: PackageTool, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+fn serve(toolbox: Toolbox, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
     let mut initialized = false;
     let mut ready = false;
     loop {
@@ -390,7 +577,7 @@ fn serve(tool: PackageTool, mut input: impl BufRead, mut output: impl Write) -> 
                 .get("io.modelcontextprotocol/clientCapabilities")
                 .is_some()
         {
-            write_message(&mut output, &modern_request(&tool, id, method, &params))?;
+            write_message(&mut output, &modern_request(&toolbox, id, method, &params))?;
             continue;
         }
         let result = match method {
@@ -416,7 +603,7 @@ fn serve(tool: PackageTool, mut input: impl BufRead, mut output: impl Write) -> 
                         id,
                         json!({"protocolVersion":version, "capabilities":{"tools":{"listChanged":false}},
                         "serverInfo":{"name":"firstcall", "title":"FirstCall", "version":env!("CARGO_PKG_VERSION")},
-                        "instructions":"Calls only the endpoint declared by this package. Credentials come from the server process environment. Responses are redacted and limited to 262144 bytes."}),
+                        "instructions":"Each tool calls only the endpoint declared by its package. Credentials come from the server environment or the OS keychain. Responses are redacted and limited to 262144 bytes."}),
                     )
                 }
             }
@@ -432,21 +619,21 @@ fn serve(tool: PackageTool, mut input: impl BufRead, mut output: impl Write) -> 
                     rpc_error(
                         id,
                         -32602,
-                        "This server has one tool and no pagination cursor",
+                        "This server lists every tool at once; no pagination cursor",
                     )
                 } else {
-                    rpc_result(id, json!({"tools":[tool.descriptor()]}))
+                    rpc_result(id, json!({"tools": toolbox.descriptors()}))
                 }
             }
             "tools/call" => {
-                if params["name"].as_str() != Some(&tool.definition.name) {
-                    rpc_error(id, -32602, "Unknown tool name")
-                } else {
+                if let Some(tool) = toolbox.get(params["name"].as_str()) {
                     match params.get("arguments") {
                         Some(Value::Object(arguments)) => rpc_result(id, tool.call(arguments)),
                         None => rpc_result(id, tool.call(&Map::new())),
                         _ => rpc_error(id, -32602, "Tool arguments must be an object"),
                     }
+                } else {
+                    rpc_error(id, -32602, "Unknown tool name")
                 }
             }
             _ => rpc_error(id, -32601, "Method not found"),
@@ -455,7 +642,7 @@ fn serve(tool: PackageTool, mut input: impl BufRead, mut output: impl Write) -> 
     }
 }
 
-fn modern_request(tool: &PackageTool, id: Value, method: &str, params: &Value) -> Value {
+fn modern_request(toolbox: &Toolbox, id: Value, method: &str, params: &Value) -> Value {
     let meta = &params["_meta"];
     let Some(version) = meta["io.modelcontextprotocol/protocolVersion"].as_str() else {
         return rpc_error(
@@ -489,19 +676,20 @@ fn modern_request(tool: &PackageTool, id: Value, method: &str, params: &Value) -
             id,
             json!({"supportedVersions":[CURRENT_PROTOCOL_VERSION],
             "capabilities":{"tools":{"listChanged":false}},"ttlMs":300000,"cacheScope":"private",
-            "instructions":"Call the package's declared tool. Credentials come from the process environment; API responses are redacted and limited to 262144 bytes."}),
+            "instructions":"Each tool calls only its package's declared endpoint. Credentials come from the server environment or the OS keychain; API responses are redacted and limited to 262144 bytes."}),
         ),
         "tools/list" if params.get("cursor").is_none() => rpc_result(
             id,
             json!({
-            "tools":[tool.descriptor()],"ttlMs":300000,"cacheScope":"private"}),
+            "tools": toolbox.descriptors(),"ttlMs":300000,"cacheScope":"private"}),
         ),
         "tools/list" => rpc_error(
             id,
             -32602,
-            "This server has one tool and no pagination cursor",
+            "This server lists every tool at once; no pagination cursor",
         ),
-        "tools/call" if params["name"].as_str() == Some(&tool.definition.name) => {
+        "tools/call" if toolbox.get(params["name"].as_str()).is_some() => {
+            let tool = toolbox.get(params["name"].as_str()).expect("checked above");
             match params.get("arguments") {
                 Some(Value::Object(arguments)) => rpc_result(id, tool.call(arguments)),
                 None => rpc_result(id, tool.call(&Map::new())),

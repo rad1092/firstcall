@@ -112,7 +112,7 @@ upload deterministic assets with `--clobber`.
 After publishing a release, verify:
 
 ```powershell
-gh release view <tag> --repo rad1092/firstcall-local-api-workbench --json assets,url
+gh release view <tag> --repo rad1092/firstcall --json assets,url
 ```
 
 Download at least one archive and run the packaged CLI:
@@ -174,3 +174,14 @@ Do not run or require:
 - desktop UI import
 - database schema migrations
 - MCP Inspector
+
+## Publishing a release
+
+1. Set the new version in `Cargo.toml` and run `cargo build` so `Cargo.lock` follows.
+2. Merge to `main`, then push a matching tag: `git tag v0.4.0 && git push origin v0.4.0`.
+3. The Release workflow builds macOS (Apple Silicon and Intel), Windows and Linux
+   archives, checks each CLI reports the tagged version, and creates a draft release
+   with `SHA256SUMS.txt`.
+4. Review the draft on GitHub and publish it.
+5. On whago.net, add the release to `content/releases.json` and list the new
+   platforms under FirstCall's `downloads` in `content/products.json`.

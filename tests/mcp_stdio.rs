@@ -12,6 +12,19 @@ use firstcall::model::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+/// Child processes start with an empty environment, except that Windows cannot
+/// open sockets without SystemRoot, so that one variable is kept there.
+fn system_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    if cfg!(windows) {
+        ["SystemRoot"]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 const SECRET: &str = "runtime-credential-never-in-model-output";
 
 fn slot(name: &str, location: SlotLocation) -> RuntimeSlot {
@@ -83,6 +96,7 @@ fn run_raw(package: &TempDir, input: &[u8], env: &[(&str, &str)], mutating: bool
     let mut command = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"));
     command
         .env_clear()
+        .envs(system_env())
         .args(["serve", "--package"])
         .arg(package.path())
         .stdin(Stdio::piped())
@@ -487,6 +501,7 @@ fn cli_native_export_relocation_and_connection_preserve_policy_and_credentials()
         let mut export = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"));
         export
             .env_clear()
+            .envs(system_env())
             .args(["package-native", "--recipe-json"])
             .arg(&recipe_path)
             .arg("--tool-json")
@@ -527,6 +542,7 @@ fn cli_native_export_relocation_and_connection_preserve_policy_and_credentials()
         let mut connect = Command::new(&installed);
         connect
             .env_clear()
+            .envs(system_env())
             .env("FIRSTCALL_BEARER_TOKEN", SECRET)
             .args(["connect", "--package"])
             .arg(&moved);
@@ -578,6 +594,7 @@ fn cli_native_export_relocation_and_connection_preserve_policy_and_credentials()
         let mut process = Command::new(config["command"].as_str().unwrap());
         process
             .env_clear()
+            .envs(system_env())
             .env("FIRSTCALL_BEARER_TOKEN", SECRET)
             .args(
                 config["args"]
@@ -688,6 +705,7 @@ fn native_export_round_trip(method: &str) {
     let mut process = Command::new(config["command"].as_str().unwrap());
     process
         .env_clear()
+        .envs(system_env())
         .args(
             config["args"]
                 .as_array()

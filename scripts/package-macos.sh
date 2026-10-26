@@ -3,26 +3,32 @@ set -Eeuo pipefail
 umask 022
 
 usage() {
-  echo "Usage: $0 <release-binary-dir> <new-output-dir> [version, default 0.3.1]" >&2
+  echo "Usage: $0 <release-binary-dir> <new-output-dir> <version>" >&2
   echo "Optional: FIRSTCALL_ICON_ICNS=/absolute/path/icon.icns" >&2
   echo "Optional: FIRSTCALL_LICENSE_FILE=/absolute/path/LICENSE (defaults to repo LICENSE)" >&2
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ $# -ne 3 ]]; then
   usage
   exit 2
 fi
 binary_dir="$1"
 output_dir="$2"
-version="${3:-0.3.1}"
+version="$3"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must be a numeric release version such as 0.3.0." >&2
   exit 2
 fi
-if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
-  echo "This packager validates Apple Silicon macOS artifacts on an Apple Silicon Mac." >&2
+if [[ "$(uname -s)" != Darwin ]]; then
+  echo "This packager builds and checks macOS artifacts on a Mac." >&2
   exit 2
 fi
+# Package for the Mac this runs on: Apple Silicon or Intel.
+case "$(uname -m)" in
+  arm64) mach_arch="arm64"; target="aarch64-apple-darwin"; platform_name="Apple Silicon" ;;
+  x86_64) mach_arch="x86_64"; target="x86_64-apple-darwin"; platform_name="Intel" ;;
+  *) echo "Unsupported Mac architecture: $(uname -m)" >&2; exit 2 ;;
+esac
 for command_name in codesign ditto lipo otool plutil python3 shasum tar; do
   command -v "$command_name" >/dev/null || {
     echo "Required tool is unavailable: $command_name" >&2
@@ -40,8 +46,8 @@ for binary in firstcall firstcall-cli; do
     echo "Missing executable release binary: $binary_dir/$binary" >&2
     exit 2
   fi
-  if [[ "$(lipo -archs "$binary_dir/$binary")" != arm64 ]]; then
-    echo "Expected an arm64 Mach-O binary: $binary" >&2
+  if [[ "$(lipo -archs "$binary_dir/$binary")" != "$mach_arch" ]]; then
+    echo "Expected an $mach_arch Mach-O binary: $binary" >&2
     exit 2
   fi
   while IFS= read -r dependency; do
@@ -79,7 +85,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-package_name="firstcall-v${version}-aarch64-apple-darwin"
+package_name="firstcall-v${version}-${target}"
 package_dir="$stage_dir/$package_name"
 app_dir="$package_dir/FirstCall.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
@@ -127,7 +133,7 @@ with (app / "Contents" / "Info.plist").open("wb") as file:
 PY
 
 cat > "$package_dir/README-RELEASE.txt" <<EOF
-FirstCall $version — Apple Silicon macOS
+FirstCall $version for macOS ($platform_name)
 
 INSTALL
 Move FirstCall.app to Applications, then open it.
@@ -143,14 +149,12 @@ From this extracted folder, run:
 To use the CLI embedded in Applications:
   /Applications/FirstCall.app/Contents/MacOS/firstcall-cli --help
 
-RELEASE SCOPE
-This archive contains the Apple Silicon macOS desktop and CLI binaries.
-It does not contain Windows, Linux, or Intel Mac builds.
-The app is ad-hoc signed for bundle integrity; it is not Apple notarized.
-macOS may require you to approve opening this downloaded app.
+FIRST LAUNCH
+If macOS blocks the first launch, open System Settings, Privacy & Security,
+and choose Open Anyway.
 
 SUPPORT
-https://github.com/rad1092/firstcall-local-api-workbench/issues
+https://github.com/rad1092/firstcall/issues
 EOF
 cp "$package_dir/README-RELEASE.txt" "$app_dir/Contents/Resources/README-RELEASE.txt"
 

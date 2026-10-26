@@ -33,6 +33,40 @@ pub trait SecretStore {
     fn status(&self) -> SecretStoreStatus;
 }
 
+/// Key for a stored credential: the API origin plus the slot name, so two APIs
+/// that both call their token `bearer_token` never share it.
+pub fn scoped_secret_key(origin: &str, slot: &str) -> String {
+    format!("{origin} {slot}")
+}
+
+/// The scheme, host and port of a base URL, as used in [`scoped_secret_key`].
+pub fn secret_origin(base_url: &str) -> Option<String> {
+    let url = url::Url::parse(base_url).ok()?;
+    url.host_str()?;
+    Some(url.origin().ascii_serialization())
+}
+
+/// Read a credential the desktop app saved, for `firstcall-cli serve`.
+/// Returns `None` when this build has no OS keychain support or nothing is saved.
+pub fn read_saved_secret(origin: &str, slot: &str) -> Option<String> {
+    #[cfg(feature = "native-keyring")]
+    {
+        let account = keyring_account_for_key(&scoped_secret_key(origin, slot));
+        if let Ok(Some(value)) = SystemKeyringBackend.get(&account) {
+            let value = value.expose_secret().to_string();
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+        None
+    }
+    #[cfg(not(feature = "native-keyring"))]
+    {
+        let _ = (origin, slot);
+        None
+    }
+}
+
 pub fn default_secret_store() -> Box<dyn SecretStore> {
     build_native_secret_store().unwrap_or_else(|| Box::new(MemorySecretStore::default()))
 }
@@ -239,6 +273,19 @@ mod tests {
     const KEYRING_BEARER_SECRET: &str = "keyring_bearer_secret_should_not_leak";
     const KEYRING_API_KEY_SECRET: &str = "keyring_api_key_secret_should_not_leak";
     const KEYRING_PASSWORD_SECRET: &str = "keyring_password_secret_should_not_leak";
+
+    #[test]
+    fn saved_secrets_are_keyed_by_api_origin() {
+        let github = secret_origin("https://api.github.com/repos").unwrap();
+        let other = secret_origin("https://api.example.com:8443/v1").unwrap();
+        assert_eq!(github, "https://api.github.com");
+        assert_eq!(other, "https://api.example.com:8443");
+        assert_ne!(
+            scoped_secret_key(&github, "bearer_token"),
+            scoped_secret_key(&other, "bearer_token")
+        );
+        assert!(secret_origin("not a url").is_none());
+    }
 
     #[test]
     fn memory_secret_store_behavior_remains_session_memory() {

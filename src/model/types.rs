@@ -146,6 +146,17 @@ pub enum SlotLocation {
 }
 
 impl SlotLocation {
+    /// Section heading for this location's inputs in the app.
+    pub fn heading(&self) -> &'static str {
+        match self {
+            Self::Path => "Path inputs",
+            Self::Query => "Query inputs",
+            Self::Header => "Header inputs",
+            Self::Body => "Body inputs",
+            Self::Auth => "Auth inputs",
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Path => "path",
@@ -292,6 +303,40 @@ impl Blocker {
             Self::UnknownFailure => "unknown_failure",
         }
     }
+
+    /// What went wrong and what to do next, in the words shown in the app.
+    pub fn guidance(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::AuthBlocked => (
+                "The API refused the request.",
+                "Add a token or key under Auth inputs, or check that the one you entered is still valid, then send again.",
+            ),
+            Self::MissingRuntimeValue => (
+                "Some required inputs are empty.",
+                "Fill in every input marked required, then send again.",
+            ),
+            Self::DocsUnclear => (
+                "No request was found in what you pasted.",
+                "Paste a complete curl command or an OpenAPI file, then choose Read request.",
+            ),
+            Self::UnsupportedInput => (
+                "This request can't be turned into a tool yet.",
+                "See the reason below. A plain GET request is the easiest place to start.",
+            ),
+            Self::NetworkBlocked => (
+                "FirstCall couldn't reach the server.",
+                "Check the base URL, your internet connection, and any proxy set in Settings.",
+            ),
+            Self::SchemaMismatch => (
+                "The response doesn't match the shape this request expects.",
+                "Look at the response on the right. If it is correct, send again to save it as the new shape.",
+            ),
+            Self::UnknownFailure => (
+                "The request failed.",
+                "Look at the status and response on the right for the API's own explanation.",
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -383,4 +428,35 @@ pub struct ExecutionResult {
     pub outcome: Outcome,
     pub blocker: Option<Blocker>,
     pub notes: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Blocker;
+
+    #[test]
+    fn every_failure_explains_what_to_do_next() {
+        for blocker in [
+            Blocker::AuthBlocked,
+            Blocker::MissingRuntimeValue,
+            Blocker::DocsUnclear,
+            Blocker::UnsupportedInput,
+            Blocker::NetworkBlocked,
+            Blocker::SchemaMismatch,
+            Blocker::UnknownFailure,
+        ] {
+            let (what, next) = blocker.guidance();
+            assert!(
+                what.ends_with('.') && next.ends_with('.'),
+                "{}",
+                blocker.label()
+            );
+            assert!(
+                !what.contains('_') && !next.contains('_'),
+                "{}",
+                blocker.label()
+            );
+        }
+        assert!(Blocker::AuthBlocked.guidance().1.contains("token"));
+    }
 }
