@@ -112,7 +112,7 @@ upload deterministic assets with `--clobber`.
 After publishing a release, verify:
 
 ```powershell
-gh release view <tag> --repo rad1092/firstcall-local-api-workbench --json assets,url
+gh release view <tag> --repo rad1092/firstcall --json assets,url
 ```
 
 Download at least one archive and run the packaged CLI:

@@ -154,7 +154,7 @@ If macOS blocks the first launch, open System Settings, Privacy & Security,
 and choose Open Anyway.
 
 SUPPORT
-https://github.com/rad1092/firstcall-local-api-workbench/issues
+https://github.com/rad1092/firstcall/issues
 EOF
 cp "$package_dir/README-RELEASE.txt" "$app_dir/Contents/Resources/README-RELEASE.txt"
 

@@ -11,7 +11,7 @@ you save stay in your OS keychain.
 
 ## Make your first tool
 
-1. Download FirstCall from the [latest release](https://github.com/rad1092/firstcall-local-api-workbench/releases/latest).
+1. Download FirstCall from the [latest release](https://github.com/rad1092/firstcall/releases/latest).
    On a Mac, move FirstCall.app to Applications.
 2. Choose **Create a tool** and paste a request, or choose **Try an example** for a
    public GitHub lookup that needs no token.
